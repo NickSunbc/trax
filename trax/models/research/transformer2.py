@@ -90,10 +90,26 @@ def Transformer2(input_vocab_size,
   if mode == 'predict':
     encoder = tl.Cache(encoder)
 
-  decoder_blocks = [
-      transformer._DecoderBlock(d_model, d_ff, n_heads, dropout,  # pylint: disable=protected-access
-                                dropout_shared_axes, mode, ff_activation)
-      for i in range(n_decoder_layers)]
+  def get_decoder_blocks():  # pylint: disable=invalid-name
+    # pylint: disable=protected-access,g-complex-comprehension
+    return [
+        transformer._DecoderBlock(d_model,
+                                  d_ff,
+                                  n_heads,
+                                  dropout,
+                                  dropout_shared_axes,
+                                  mode,
+                                  ff_activation)
+        for i in range(n_decoder_layers)
+    ]
+    # pylint: enable=protected-access,g-complex-comprehension
+
+  decoder_blocks = get_decoder_blocks()
+  # Each block in decoder_blocks is [Residual(LN, Attn, Drop), Residual(FFNN)]
+  # and we don't want the FFNN part.
+  decoder_blocks_sans_ff = [l[:-1] for l in decoder_blocks]
+
+  concatenated_decoder_blocks = get_decoder_blocks()
 
   # pylint: disable=protected-access
   # Assemble and return the model.
@@ -116,12 +132,16 @@ def Transformer2(input_vocab_size,
       tl.ShiftRight(mode=mode),         # stok_d vec_e mask_e tok_e tok_d
       out_encoder,                      # svec_d vec_e mask_e tok_e tok_d
 
+      # Causal attention and LN only on the decoder tokens.
+      decoder_blocks_sans_ff,           # svec_d vec_e mask_e tok_e tok_d
+      tl.LayerNorm(),                   # svec_d vec_e mask_e tok_e tok_d
+
       # Concat encoder and decoder.
       tl.Select([1, 0]),                # vec_e svec_d mask_e tok_e tok_d
       ConcatWithPadding(mode=mode),     # vec_ed tok_e tok_d
 
       # Decoder blocks with causal attention
-      decoder_blocks,                   # vec_ed tok_e tok_d
+      concatenated_decoder_blocks,      # vec_ed tok_e tok_d
       tl.LayerNorm(),                   # vec_ed tok_e tok_d
 
       # Separate out the encoder part from the concatenated vector.

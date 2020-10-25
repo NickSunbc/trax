@@ -630,27 +630,34 @@ def Reformer2(input_vocab_size,
   if mode == 'predict':
     encoder = tl.Cache(encoder)
 
-  decoder_blocks = []
-
   if isinstance(encoder_decoder_attention_type, (tuple, list)):
     assert n_decoder_layers % len(encoder_decoder_attention_type) == 0
   else:
     encoder_decoder_attention_type = [encoder_decoder_attention_type]
-  for layer_idx in range(n_decoder_layers):
-    layer_attention_type = encoder_decoder_attention_type[
-        layer_idx % len(encoder_decoder_attention_type)]
-    decoder_block = DecoderBlock(
-        d_model, d_ff, d_attention_key, d_attention_value, n_heads,
-        attention_type=layer_attention_type,
-        dropout=dropout,
-        ff_activation=ff_activation,
-        ff_dropout=ff_dropout,
-        ff_use_sru=ff_use_sru,
-        ff_chunk_size=ff_chunk_size,
-        ff_sparsity=ff_sparsity,
-        attention_chunk_size=attention_chunk_size,
-        mode=mode)
-    decoder_blocks.append(decoder_block)
+
+  def get_decoder_blocks():
+    decoder_blocks = []
+    for layer_idx in range(n_decoder_layers):
+      layer_attention_type = encoder_decoder_attention_type[
+          layer_idx % len(encoder_decoder_attention_type)]
+      decoder_block = DecoderBlock(
+          d_model, d_ff, d_attention_key, d_attention_value, n_heads,
+          attention_type=layer_attention_type,
+          dropout=dropout,
+          ff_activation=ff_activation,
+          ff_dropout=ff_dropout,
+          ff_use_sru=ff_use_sru,
+          ff_chunk_size=ff_chunk_size,
+          ff_sparsity=ff_sparsity,
+          attention_chunk_size=attention_chunk_size,
+          mode=mode)
+      decoder_blocks.append(decoder_block)
+    return decoder_blocks
+
+  decoder_blocks = get_decoder_blocks()
+  # Each block in get_decoder_blocks is
+  # [Residual(LN, Attn, Drop), Residual(FFNN)] and we don't want the FFNN part.
+  decoder_blocks_sans_ffnn = [l[:-1] for l in get_decoder_blocks()]
 
   # Assemble and return the model.
   return tl.Serial(
@@ -672,6 +679,12 @@ def Reformer2(input_vocab_size,
 
       # Decode.
       tl.Select([3, 0, 1, 2]),                 #  vec_d vec_e mask_e tok_e tok_d
+
+      # Causal attention and LN only on the decoder tokens.
+      _ReversibleSerialForget(
+          decoder_blocks_sans_ffnn,
+          d_model,
+          n_layers_forget),                    #  vec_d vec_e mask_e tok_e tok_d
 
       # Concat encoder and decoder, given encoder mask.
       tl.Select([1, 0]),                       # vec_e vec_d mask_e tok_e tok_d
